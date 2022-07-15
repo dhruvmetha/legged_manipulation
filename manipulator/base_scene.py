@@ -35,6 +35,7 @@ from rsl_rl.env.vec_env import VecEnv
 import torch
 
 from a1_config import SceneCfg
+from ground_layer import BaseGround
 from utils import class_to_dict
 
 
@@ -80,7 +81,7 @@ class BaseScene(VecEnv):
         # control rates
         self.decimation_rate = 1
         self.dt = self.cfg.sim.dt
-        self.max_episode_length_s = None
+        self.max_episode_length_s = 1000
         self.max_episode_length = None
 
 
@@ -169,6 +170,9 @@ class BaseScene(VecEnv):
     def reset(self):
         """ Reset all robots"""
         self._reset_envs(torch.arange(self.num_envs, dtype=torch.long, device=self.device))
+        self.episode_length_buf[:] = 0.
+        self.reset_buf[:] = 0.
+        self.time_out_buf[:] = 0.
         return self.obs_buf, self.extras
     #     self.reset_idx(torch.arange(self.num_envs, device=self.device))
     #     obs, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
@@ -209,6 +213,11 @@ class BaseScene(VecEnv):
         self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
     
     def create_env(self):
+        
+        spacing = self.cfg.env.env_spacing
+
+        # loading the base ground
+        base_ground = BaseGround('ground', self.cfg.ground, self, spacing)
 
         # loading all the assets
         for idx, actor in enumerate(self.actors):
@@ -220,13 +229,15 @@ class BaseScene(VecEnv):
             self.num_obs += self.actor_objs[actor_name].num_observations
 
             # using the assumption that we only have one actuated asset (robot), we use to setup dt, max_episode_length
+            self.max_episode_length_s = self.cfg.env.episode_length_s
             if self.actor_objs[actor_name].num_dof > 0:
                 self.decimation_rate = self.actor_objs[actor_name].decimation_rate
                 self.dt *= self.decimation_rate
-                self.max_episode_length_s = self.cfg.env.episode_length_s
                 self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
-                
 
+        if self.max_episode_length is None:
+                self.max_episode_length = self.max_episode_length_s
+        
 
         # saving slice indices per asset for easy query into observations/actions for each asset
         self.all_obs = torch.cumsum(torch.as_tensor([0] + [i.num_observations for _, i in self.actor_objs.items()]), dim=0).to(dtype=torch.int32)
@@ -235,19 +246,27 @@ class BaseScene(VecEnv):
         # TODO: change this way of defining all actions
         self.num_actions = self.all_actions[-1]
 
+
+        
+
         # creating the envs and their actors (realized assets).
         self._get_env_origins()
         current_actor_ctr = 0
         for env_idx in range(self.num_envs):
-            env_handle = self.gym.create_env(self.sim, gymapi.Vec3(-1., 1., 0.), gymapi.Vec3(-1., 1., 0.), int(np.sqrt(self.num_envs)))
+            env_handle = self.gym.create_env(self.sim, gymapi.Vec3(-0, spacing, 0.), gymapi.Vec3(-0, spacing, 0.), int(np.sqrt(self.num_envs)))
+
+            # creating ground
+            current_actor_ctr += base_ground.create_ground(env_handle, env_idx, self.env_origins[env_idx])
 
             for actor_name, asset in self.actor_objs.items():
                 actor_handle = asset.create_actor(env_handle, env_idx, self.env_origins[env_idx])
                 if actor_name not in self.actor_indices.keys():
                     self.actor_indices[actor_name] = {
                         'root' : [],
-                        'rb': [],
-                        'dof': []
+                        'rb_env': [],
+                        'rb_sim': [],
+                        'dof_env': [],
+                        'dof_sim': []
                     }
                 
                 # storing actor indices for root state usage 
@@ -255,14 +274,21 @@ class BaseScene(VecEnv):
                 current_actor_ctr += 1
 
                 # storing actor indices for rigid body state usage
-                self.actor_indices[actor_name]['rb'].extend([self.gym.get_actor_rigid_body_index(env_handle, actor_handle, rb_idx, gymapi.DOMAIN_ENV) for rb_idx in range(asset.num_bodies)])
+                # env
+                self.actor_indices[actor_name]['rb_env'].extend([self.gym.get_actor_rigid_body_index(env_handle, actor_handle, rb_idx, gymapi.DOMAIN_ENV) for rb_idx in range(asset.num_bodies)])
+                # sim
+                self.actor_indices[actor_name]['rb_sim'].extend([self.gym.get_actor_rigid_body_index(env_handle, actor_handle, rb_idx, gymapi.DOMAIN_SIM) for rb_idx in range(asset.num_bodies)])
                 
 
                 # storing actor indices for dof state usage
-                self.actor_indices[actor_name]['dof'].extend([self.gym.get_actor_dof_index(env_handle, actor_handle, dof_idx, gymapi.DOMAIN_SIM) for dof_idx in range(asset.num_dof)])
+                # env
+                self.actor_indices[actor_name]['dof_env'].extend([self.gym.get_actor_dof_index(env_handle, actor_handle, dof_idx, gymapi.DOMAIN_ENV) for dof_idx in range(asset.num_dof)])
+                # sim
+                self.actor_indices[actor_name]['dof_sim'].extend([self.gym.get_actor_dof_index(env_handle, actor_handle, dof_idx, gymapi.DOMAIN_SIM) for dof_idx in range(asset.num_dof)])
 
                 # storing actor handles for functional usage
                 self.actor_handles[actor_name].append(actor_handle)
+                
             # storing env handles for functional usage
             self.envs.append(env_handle)
         # self.actor_indices_tensor = {}
@@ -298,20 +324,32 @@ class BaseScene(VecEnv):
         self.num_rbs_env = self.num_rbs_sim // self.num_envs
 
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        rb_states_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
+
+
+        # contacts = self.gym.get_rigid_contacts(self.sim)
+        # print(contacts)
         
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
 
-        self.root_states = gymtorch.wrap_tensor(actor_root_state) #  num_actors * root_states
+        self.root_states = gymtorch.wrap_tensor(actor_root_state)[:, ] #  num_actors * root_states
+        self.rb_states = gymtorch.wrap_tensor(rb_states_tensor)
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor) # num_all_dofs * 2
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
+
+        print('this is rb state', self.rb_states.shape)
+        print('this is root state', self.root_states.shape)
 
         # additional buffers required to set forces on the assets for the physics sim or direct resets.
 
         self.dof_actuation_force = torch.zeros(self.num_dofs_sim, device=self.device, dtype=torch.float)
+
+        self.rigid_body_force_at_pos_tensor = torch.zeros((self.num_envs, self.num_rbs_env, 3), device=self.device, dtype=torch.float)
 
 
         # using the above set buffers to initialize buffers for the assets
@@ -334,7 +372,7 @@ class BaseScene(VecEnv):
         self.render()
         for _ in range(self.decimation_rate):
             for idx, (name, asset) in enumerate(self.actor_objs.items()):
-                if asset.num_dofs > 0:
+                if True or asset.num_dofs > 0:
                     asset.step(actions.clone().contiguous())
                     self.gym.simulate(self.sim)
                     # if self.device == 'cpu':
@@ -348,8 +386,12 @@ class BaseScene(VecEnv):
 
 
         if torch.is_tensor(self.reset_buf):
+
             env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-            self._reset_envs(env_ids)
+
+            if len(env_ids) > 0:
+                # print(env_ids)
+                self._reset_envs(env_ids)
 
         self._compute_observations()
 
@@ -374,6 +416,8 @@ class BaseScene(VecEnv):
             asset.refresh_buffers()
         for _, asset in self.actor_objs.items():
             asset.post_physics_step()
+
+        # print(self.contact_forces)
     
     def _check_termination(self):
         """
@@ -382,11 +426,13 @@ class BaseScene(VecEnv):
         # TODO: implement for local actor resets, now only implemented for global sim resets.
         self.reset_buf = None
         for _, asset in self.actor_objs.items():
-            if asset.num_dof > 0:
-                if not torch.is_tensor(self.reset_buf):
-                    self.reset_buf = asset.reset_buf
-                self.reset_buf |= asset.reset_buf.to(dtype=torch.bool)
+            # if asset.num_dof > 0:
+            if not torch.is_tensor(self.reset_buf):
+                self.reset_buf = asset.reset_buf
+            self.reset_buf |= asset.reset_buf.to(dtype=torch.bool)
         
+        if self.reset_buf is None:
+            self.reset_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf |= self.time_out_buf
 
@@ -407,8 +453,13 @@ class BaseScene(VecEnv):
         """
         if len(env_ids) == 0:
             return
+        print('here')
         for _, asset in self.actor_objs.items():
             asset.reset_idx(env_ids)
+
+        self.episode_length_buf[:] = 0.
+        self.reset_buf[:] = 0.
+        self.time_out_buf[:] = 0.
 
     
     def _compute_observations(self):
@@ -425,6 +476,8 @@ class BaseScene(VecEnv):
                     self.obs_buf = torch.cat([self.obs_buf, asset.obs_buf], dim=-1)
             else:
                 continue
+        # print(self.contact_forces.shape, self.contact_forces)
+        
 
     def _create_ground_plane(self):
         """ Adds a ground plane to the simulation, sets friction and restitution based on the cfg.

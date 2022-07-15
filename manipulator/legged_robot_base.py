@@ -83,6 +83,7 @@ class LeggedRobot():
         """
         start_pose = gymapi.Transform()
         self.env_origins = self.scene.env_origins
+        # print(env_origin)
         start_pose.p = gymapi.Vec3(*self.base_init_state[:3])
         # env_lower = gymapi.Vec3(0., 0., 0.)
         # env_upper = gymapi.Vec3(0., 0., 0.)
@@ -112,9 +113,12 @@ class LeggedRobot():
         for i in range(len(self.penalized_contact_names)):
             self.penalised_contact_indices[i] = self.scene.gym.find_actor_rigid_body_handle(env_handle, actor_handle, self.penalized_contact_names[i])
 
+        # print('hereeee')
         self.termination_contact_indices = torch.zeros(len(self.termination_contact_names), dtype=torch.long, device=self.scene.device, requires_grad=False)
+        # print(self.termination_contact_indices)
         for i in range(len(self.termination_contact_names)):
             self.termination_contact_indices[i] = self.scene.gym.find_actor_rigid_body_handle(env_handle, actor_handle, self.termination_contact_names[i])
+        # print(self.termination_contact_indices)
 
         return actor_handle
 
@@ -123,9 +127,9 @@ class LeggedRobot():
         # cloning the root states, dof, net_contact_forces for this asset to process
         self.root_states = self.scene.root_states[self.scene.actor_indices[self.name]['root']].clone().contiguous() 
 
-        self.dof_state = self.scene.dof_state[self.scene.actor_indices[self.name]['dof']].clone().contiguous()
+        self.dof_state = self.scene.dof_state[self.scene.actor_indices[self.name]['dof_sim']].clone().contiguous()
 
-        self.contact_forces = self.scene.contact_forces[:, self.scene.actor_indices[self.name]['rb'], :].clone().contiguous()
+        self.contact_forces = self.scene.contact_forces #[:, self.scene.actor_indices[self.name]['rb_env'], :].clone().contiguous()
 
         
         # deriving and creating more buffers
@@ -189,10 +193,14 @@ class LeggedRobot():
         # for _ in range(self.cfg.control.decimation):
         self.torques = self._compute_torques(self.actions).view(self.torques.shape)
 
-        self.scene.dof_actuation_force[self.scene.actor_indices[self.name]['dof']] = self.torques.flatten()
+        self.scene.dof_actuation_force[self.scene.actor_indices[self.name]['dof_sim']] = self.torques.flatten()
 
+        # print('here')
         # TODO: should we call this in base scene.
         h = self.scene.gym.set_dof_actuation_force_tensor_indexed(self.scene.sim, gymtorch.unwrap_tensor(self.scene.dof_actuation_force), gymtorch.unwrap_tensor(torch.as_tensor(self.scene.actor_indices[self.name]['root'], dtype=torch.int32, device=self.scene.device)), len(self.scene.actor_indices[self.name]['root']))
+
+        # print('here')
+
 
         #TODO: render in base scene
         # self.scene.gym.simulate(self.scene.sim) #TODO: render in base scene
@@ -210,11 +218,11 @@ class LeggedRobot():
 
     def refresh_buffers(self):
         # cloning the root states, dof, net_contact_forces for this asset to process
-        self.root_states = self.scene.root_states[self.scene.actor_indices[self.name]['root']].clone().contiguous() 
+        self.root_states = self.scene.root_states[self.scene.actor_indices[self.name]['root']].clone().contiguous()
 
-        self.dof_state = self.scene.dof_state[self.scene.actor_indices[self.name]['dof']].clone().contiguous()
+        self.dof_state = self.scene.dof_state[self.scene.actor_indices[self.name]['dof_sim']].clone().contiguous()
 
-        self.contact_forces = self.scene.contact_forces[:, self.scene.actor_indices[self.name]['rb'], :].clone().contiguous()
+        self.contact_forces = self.scene.contact_forces # [:, self.scene.actor_indices[self.name]['rb_env'], :].clone().contiguous()
 
         self.dof_pos = self.dof_state.view(self.scene.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.scene.num_envs, self.num_dof, 2)[..., 1]
@@ -264,7 +272,7 @@ class LeggedRobot():
         """ Check if environments need to be reset
         """
 
-        # print(self.termination_contact_indices)
+        # print(self.termination_contact_indices, self.contact_forces.shape)
         # print(self.contact_forces)
         self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
         # self.time_out_buf = self.episode_length_buf > self.max_episode_length #TODO: render in base scene # no terminal reward for time-outs
@@ -349,7 +357,7 @@ class LeggedRobot():
         self.dof_vel[env_ids] = 0.
         
         # env_ids_int32 = env_ids.to(dtype=torch.int32)
-        self.scene.dof_state[self.scene.actor_indices[self.name]['dof']] = self.dof_state.clone()
+        self.scene.dof_state[self.scene.actor_indices[self.name]['dof_sim']] = self.dof_state.clone()
         
         self.scene.gym.set_dof_state_tensor_indexed(self.scene.sim,
                                               gymtorch.unwrap_tensor(self.scene.dof_state),

@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+from faulthandler import disable
 from base_config import BaseConfig
 from legged_gym import LEGGED_GYM_ROOT_DIR
 
@@ -54,9 +55,9 @@ class SceneCfg(BaseConfig):
             contact_collection = 2 # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
 
     class env:
-        num_envs = 10
+        num_envs = 128
         env_spacing = 3.
-        episode_length_s = 20
+        episode_length_s = 100
 
     class terrain:
         mesh_type = 'plane' # "heightfield" # none, plane, heightfield or trimesh
@@ -89,6 +90,20 @@ class SceneCfg(BaseConfig):
         pos = [10, 0, 6]  # [m]
         lookat = [11., 5, 3.]  # [m]
 
+    class ground:
+        sx = 0.25
+        sy = 0.25
+        sz = 0.0001
+        self_collisions = 0
+        
+        class asset_options:
+            density = 1000
+            fix_base_link = True
+            disable_gravity = False
+
+
+
+
 class LeggedRobotCfg(BaseConfig):
     class env:
         # num_envs = 4096
@@ -117,7 +132,7 @@ class LeggedRobotCfg(BaseConfig):
             heading = [0, 0]
 
     class init_state:
-        pos = [0.0, 0.0, 0.42] # x,y,z [m]
+        pos = [0.5, 1.5, 0.5] # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
@@ -238,7 +253,7 @@ class BoxCfg(BaseConfig):
         num_actions = 0
 
     class init_state:
-        pos = [0.5, 0.0, 0.125] # x,y,z [m]
+        pos = [0.5, 0.0, 0.025] # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 0.0] # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
@@ -249,14 +264,14 @@ class BoxCfg(BaseConfig):
         penalize_contacts_on = []
         terminate_after_contacts_on = []
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
-        sx = 0.25
-        sy = 0.25
-        sz = 0.25
+        sx = 0.05
+        sy = 0.05
+        sz = 0.05
 
         class asset_options:
-            density = 0.1
+            density = 1
             disable_gravity = False
-            fix_base_link = True       
+            # fix_base_link = True       
     
     class control:
         # PD Drive parameters:

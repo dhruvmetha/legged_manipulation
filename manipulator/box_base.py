@@ -2,7 +2,8 @@ import os
 import torch
 from base_scene import BaseScene
 from a1_config import BoxCfg
-from isaacgym import gymapi
+from isaacgym import gymapi, gymtorch
+from isaacgym_utils.math_utils import np_to_vec3
 from isaacgym.torch_utils import to_torch, torch_rand_float
 from utils import class_to_dict
 
@@ -23,7 +24,6 @@ class BoxBase():
         
         self.actor_handles = []
 
-        
         self._load_asset()
 
     def _load_asset(self):
@@ -68,13 +68,21 @@ class BoxBase():
         return actor_handle
 
     def init_buffers(self, *args):
-        pass
+        self.root_states = self.scene.root_states[self.scene.actor_indices[self.name]['root']].clone().contiguous()
+
+        self.rb_states = self.scene.rb_states[self.scene.actor_indices[self.name]['rb_sim']].clone().contiguous()
+
+        self.extras = {}
 
     def refresh_buffers(self, *args):
-        pass
+        self.root_states = self.scene.root_states[self.scene.actor_indices[self.name]['root']].clone().contiguous()
+
+        self.rb_states = self.scene.rb_states[self.scene.actor_indices[self.name]['rb_sim']].clone().contiguous()
 
     def step(self, actions):
-        pass
+        # self.apply_force()
+        self.compute_observations()
+        self._compute_rewards()
 
     def post_physics_step(self):
         pass
@@ -84,6 +92,35 @@ class BoxBase():
 
     def compute_observations(self):
         pass
+
+    def _compute_rewards(self):
+        pass
+
+    def apply_force(self):
+        
+
+        pos = self.rb_states[self.scene.actor_indices[self.name]['rb_sim'], :3]
+
+        vel = self.rb_states[self.scene.actor_indices[self.name]['rb_sim'], 7:10]
+
+        # print(pos)
+        
+        force = torch.as_tensor([2.0, 0, 0], device=self.scene.device).float()
+
+        self.scene.rigid_body_force_at_pos_tensor[:, self.scene.actor_indices[self.name]['rb_sim'][0], :] = force
+
+
+        # print(self.scene.rigid_body_force_at_pos_tensor[torch.linalg.norm(vel, dim=-1) > 0.1])
+
+        self.scene.rigid_body_force_at_pos_tensor[torch.linalg.norm(vel, dim=-1) > 0.2, self.scene.actor_indices[self.name]['rb_sim'][0], :] = torch.as_tensor([-0.0, 0, 0], device=self.scene.device).float()
+
+
+        self.scene.gym.apply_rigid_body_force_at_pos_tensors(self.scene.sim, gymtorch.unwrap_tensor(self.scene.rigid_body_force_at_pos_tensor),gymtorch.unwrap_tensor(pos),gymapi.ENV_SPACE)
+
+
+
+
+
 
     #------------- Callbacks --------------
     def _process_rigid_shape_props(self, props, env_id):
@@ -105,8 +142,10 @@ class BoxBase():
         #         friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets,1), device='cpu')
         #         self.friction_coeffs = friction_buckets[bucket_ids]
 
-        #     for s in range(len(props)):
-        #         props[s].friction = self.friction_coeffs[env_id]
+        for s in range(len(props)):
+            props[s].friction = .5 # 1 # 0.2 # self.friction_coeffs[env_id]
+
+        # print(props[0].friction, props[0].restitution, props[0].rolling_friction)
         return props
 
     def _process_dof_props(self, props, env_id):
